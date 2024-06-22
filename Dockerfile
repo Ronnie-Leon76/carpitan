@@ -15,13 +15,12 @@ ENV RAILS_ENV="production" \
     BUNDLE_PATH="/usr/local/bundle" \
     BUNDLE_WITHOUT="development"
 
-
 # Throw-away build stage to reduce size of final image
 FROM base as build
 
-# Install packages needed to build gems and node modules
+# Install packages needed to build gems, node modules, and Python
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y build-essential curl git libpq-dev node-gyp pkg-config python-is-python3 imagemagick libvips libvips-dev libvips-tools poppler-utils
+    apt-get install --no-install-recommends -y build-essential curl git libpq-dev node-gyp pkg-config python-is-python3 python3-pip python3-venv imagemagick libvips libvips-dev libvips-tools poppler-utils
 
 # Install JavaScript dependencies
 ARG NODE_VERSION=20.11.0
@@ -51,18 +50,41 @@ RUN bundle exec bootsnap precompile app/ lib/
 # Precompiling assets for production without requiring secret RAILS_MASTER_KEY
 RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
 
-
 # Final stage for app image
 FROM base
 
 # Install packages needed for deployment
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y curl libvips postgresql-client && \
+    apt-get install --no-install-recommends -y curl libvips postgresql-client python3 python3-pip python3-venv && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
 # Copy built artifacts: gems, application
 COPY --from=build /usr/local/bundle /usr/local/bundle
 COPY --from=build /rails /rails
+
+# Create and activate virtual environment
+RUN python3 -m venv /venv
+ENV PATH="/venv/bin:$PATH"
+
+# Install Poetry
+RUN pip install --upgrade pip && \
+    pip install poetry==1.6.1 && \
+    poetry config virtualenvs.create false
+
+# Copy dependencies
+COPY HansardReport/hansard-report/pyproject.toml HansardReport/hansard-report/README.md HansardReport/hansard-report/poetry.lock* ./
+
+# Copy packages
+COPY HansardReport/hansard-report/packages ./packages
+
+# Install dependencies
+RUN poetry install --no-interaction --no-ansi --no-root
+
+# Copy application code
+COPY HansardReport/hansard-report/app ./app
+
+# Install app
+RUN poetry install --no-interaction --no-ansi
 
 # Run and own only the runtime files as a non-root user for security
 RUN useradd rails --create-home --shell /bin/bash && \
@@ -74,4 +96,7 @@ ENTRYPOINT ["/rails/bin/docker-entrypoint"]
 
 # Start the server by default, this can be overwritten at runtime
 EXPOSE 3000
-CMD ["./bin/rails", "server"]
+EXPOSE 8080
+
+# CMD ["./bin/rails", "server"]
+CMD ["sh", "-c", "./bin/rails server -b 0.0.0.0 & cd /hansard-report && exec uvicorn app.server:app --host 0.0.0.0 --port 8080"]
